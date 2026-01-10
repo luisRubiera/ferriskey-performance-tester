@@ -1,0 +1,33 @@
+# Results directory (generated during test runs)
+results/*.json
+results/*.csv
+!results/.gitkeep
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+
+# Node modules (if using any npm packages)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files
+/tmp/
+*.tmp
+*.log
+
+# Environment files with secrets
+.env
+.env.local

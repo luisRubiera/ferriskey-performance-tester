@@ -1,0 +1,17 @@
+[project]
+name = "ferriskey-perf-tester"
+version = "0.1.0"
+description = "Performance testing suite for FerrisKey IAM"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+seed = "scripts.seed_test_data:main"
+cleanup = "scripts.cleanup_test_data:main"
+
+[tool.uv]
+dev-dependencies = []

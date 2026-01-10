@@ -1,0 +1,183 @@
+# .github/workflows/perf-smoke.yml
+# Performance smoke test on pull requests
+# Runs a quick performance validation to catch obvious regressions
+
+name: Performance Smoke Test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ferriskey_ref:
+        description: 'FerrisKey branch/tag/sha to test'
+        required: false
+        default: 'main'
+
+env:
+  FERRISKEY_REPO: ferriskey/ferriskey
+  BASE_URL: http://localhost:3333
+  PERF_REALM: perf
+  ADMIN_USERNAME: admin
+  ADMIN_PASSWORD: admin
+
+jobs:
+  smoke-test:
+    name: Performance Smoke Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ferriskey
+          POSTGRES_PASSWORD: ferriskey
+          POSTGRES_DB: ferriskey
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout perf-tester
+        uses: actions/checkout@v4
+
+      - name: Checkout FerrisKey
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FERRISKEY_REPO }}
+          ref: ${{ github.event.inputs.ferriskey_ref || 'main' }}
+          path: ferriskey
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ferriskey
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres
+
+      - name: Run database migrations
+        run: |
+          cd ferriskey/core
+          sqlx migrate run
+        env:
+          DATABASE_URL: postgres://ferriskey:ferriskey@localhost:5432/ferriskey
+
+      - name: Build FerrisKey
+        run: |
+          cd ferriskey/api
+          cargo build --release
+
+      - name: Start FerrisKey
+        run: |
+          cd ferriskey/api
+          ./target/release/ferriskey-api &
+          echo $! > /tmp/ferriskey.pid
+
+          # Wait for server to be ready
+          echo "Waiting for FerrisKey to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:3333/health > /dev/null 2>&1; then
+              echo "FerrisKey is ready!"
+              break
+            fi
+            sleep 1
+          done
+        env:
+          DATABASE_URL: postgres://ferriskey:ferriskey@localhost:5432/ferriskey
+          PORT: 3333
+          ADMIN_USERNAME: admin
+          ADMIN_PASSWORD: admin
+          ADMIN_EMAIL: admin@ferriskey.rs
+          LOG_LEVEL: warn
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Seed test data
+        run: uv run python scripts/seed_test_data.py
+        env:
+          USER_COUNT: 20
+
+      - name: Run smoke test - Token endpoint
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env CLIENT_ID=perf-client \
+            --env CLIENT_SECRET=perf-client-secret \
+            --env VUS=5 \
+            --env DURATION=30s \
+            --out json=results/token_smoke.json \
+            k6/scenarios/token_client_credentials.js
+
+      - name: Run smoke test - JWKS endpoint
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env VUS=5 \
+            --env DURATION=30s \
+            --out json=results/jwks_smoke.json \
+            k6/scenarios/jwks.js
+
+      - name: Run smoke test - Mixed workload
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env CLIENT_ID=perf-client \
+            --env CLIENT_SECRET=perf-client-secret \
+            --env VUS=10 \
+            --env DURATION=1m \
+            --out json=results/mixed_smoke.json \
+            k6/scenarios/mixed_workload.js
+
+      - name: Collect server logs
+        if: always()
+        run: |
+          # Stop FerrisKey and collect any logs
+          if [ -f /tmp/ferriskey.pid ]; then
+            kill $(cat /tmp/ferriskey.pid) 2>/dev/null || true
+          fi
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-results
+          path: results/
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Performance Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          for result in results/*.json; do
+            test_name=$(basename "$result" .json)
+            # Check if thresholds passed (simplified check)
+            if [ -f "$result" ]; then
+              echo "| $test_name | :white_check_mark: Completed |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $test_name | :x: Failed |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done

@@ -1,0 +1,24 @@
+[
+  {
+    "name": "Performance Test Client",
+    "client_id": "perf-client",
+    "client_type": "confidential",
+    "service_account_enabled": true,
+    "public_client": false,
+    "protocol": "openid-connect",
+    "enabled": true,
+    "direct_access_grants_enabled": true,
+    "_comment": "Main client for performance tests - supports client_credentials and password grants"
+  },
+  {
+    "name": "Performance Public Client",
+    "client_id": "perf-public-client",
+    "client_type": "public",
+    "service_account_enabled": false,
+    "public_client": true,
+    "protocol": "openid-connect",
+    "enabled": true,
+    "direct_access_grants_enabled": true,
+    "_comment": "Public client for testing password grant without client_secret"
+  }
+]

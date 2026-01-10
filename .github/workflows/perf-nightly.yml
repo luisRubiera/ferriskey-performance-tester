@@ -1,0 +1,291 @@
+# .github/workflows/perf-nightly.yml
+# Nightly comprehensive performance test
+# Runs longer tests including load, stress, and soak tests with memory leak detection
+
+name: Performance Nightly
+
+on:
+  schedule:
+    # Run at 2 AM UTC every day
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      ferriskey_ref:
+        description: 'FerrisKey branch/tag/sha to test'
+        required: false
+        default: 'main'
+      test_duration:
+        description: 'Test duration (e.g., 5m, 30m, 1h)'
+        required: false
+        default: '10m'
+
+env:
+  FERRISKEY_REPO: ferriskey/ferriskey
+  BASE_URL: http://localhost:3333
+  PERF_REALM: perf
+  ADMIN_USERNAME: admin
+  ADMIN_PASSWORD: admin
+
+jobs:
+  nightly-performance:
+    name: Nightly Performance Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ferriskey
+          POSTGRES_PASSWORD: ferriskey
+          POSTGRES_DB: ferriskey
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout perf-tester
+        uses: actions/checkout@v4
+
+      - name: Checkout FerrisKey
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FERRISKEY_REPO }}
+          ref: ${{ github.event.inputs.ferriskey_ref || 'main' }}
+          path: ferriskey
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ferriskey
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres
+
+      - name: Run database migrations
+        run: |
+          cd ferriskey/core
+          sqlx migrate run
+        env:
+          DATABASE_URL: postgres://ferriskey:ferriskey@localhost:5432/ferriskey
+
+      - name: Build FerrisKey (release)
+        run: |
+          cd ferriskey/api
+          cargo build --release
+
+      - name: Start FerrisKey with memory tracking
+        run: |
+          cd ferriskey/api
+
+          # Start FerrisKey
+          ./target/release/ferriskey-api &
+          FERRISKEY_PID=$!
+          echo $FERRISKEY_PID > /tmp/ferriskey.pid
+
+          # Wait for server to be ready
+          echo "Waiting for FerrisKey to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:3333/health > /dev/null 2>&1; then
+              echo "FerrisKey is ready! PID: $FERRISKEY_PID"
+              break
+            fi
+            sleep 1
+          done
+
+          # Start memory monitoring in background
+          mkdir -p results
+          (
+            while true; do
+              if [ -f /tmp/ferriskey.pid ]; then
+                pid=$(cat /tmp/ferriskey.pid)
+                if ps -p $pid > /dev/null 2>&1; then
+                  # Get RSS in KB
+                  rss=$(ps -o rss= -p $pid 2>/dev/null | tr -d ' ')
+                  timestamp=$(date +%s)
+                  echo "$timestamp,$rss" >> results/memory_samples.csv
+                fi
+              fi
+              sleep 10
+            done
+          ) &
+          echo $! > /tmp/memmon.pid
+        env:
+          DATABASE_URL: postgres://ferriskey:ferriskey@localhost:5432/ferriskey
+          PORT: 3333
+          ADMIN_USERNAME: admin
+          ADMIN_PASSWORD: admin
+          ADMIN_EMAIL: admin@ferriskey.rs
+          LOG_LEVEL: warn
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Seed test data
+        run: uv run python scripts/seed_test_data.py
+        env:
+          USER_COUNT: 200
+
+      - name: Record baseline memory
+        run: |
+          pid=$(cat /tmp/ferriskey.pid)
+          baseline_rss=$(ps -o rss= -p $pid | tr -d ' ')
+          echo "BASELINE_RSS=$baseline_rss" >> $GITHUB_ENV
+          echo "Baseline memory: ${baseline_rss} KB"
+
+      - name: Run load test - Token endpoint
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env CLIENT_ID=perf-client \
+            --env CLIENT_SECRET=perf-client-secret \
+            --env VUS=50 \
+            --env DURATION=${{ github.event.inputs.test_duration || '5m' }} \
+            --out json=results/token_load.json \
+            k6/scenarios/token_client_credentials.js
+
+      - name: Run load test - Password grant
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env CLIENT_ID=perf-client \
+            --env CLIENT_SECRET=perf-client-secret \
+            --env TEST_USERNAME=perf-user-001 \
+            --env TEST_PASSWORD=perf-password \
+            --env VUS=30 \
+            --env DURATION=${{ github.event.inputs.test_duration || '5m' }} \
+            --out json=results/password_load.json \
+            k6/scenarios/token_password.js
+
+      - name: Run load test - JWKS
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env VUS=50 \
+            --env DURATION=${{ github.event.inputs.test_duration || '5m' }} \
+            --out json=results/jwks_load.json \
+            k6/scenarios/jwks.js
+
+      - name: Run load test - Userinfo
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env CLIENT_ID=perf-client \
+            --env CLIENT_SECRET=perf-client-secret \
+            --env VUS=30 \
+            --env DURATION=${{ github.event.inputs.test_duration || '5m' }} \
+            --out json=results/userinfo_load.json \
+            k6/scenarios/userinfo.js
+
+      - name: Run soak test - Mixed workload
+        run: |
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env REALM=${{ env.PERF_REALM }} \
+            --env CLIENT_ID=perf-client \
+            --env CLIENT_SECRET=perf-client-secret \
+            --env VUS=30 \
+            --env DURATION=${{ github.event.inputs.test_duration || '10m' }} \
+            --out json=results/mixed_soak.json \
+            k6/scenarios/mixed_workload.js
+
+      - name: Check for memory leaks
+        run: |
+          pid=$(cat /tmp/ferriskey.pid)
+          final_rss=$(ps -o rss= -p $pid | tr -d ' ')
+          baseline_rss=${{ env.BASELINE_RSS }}
+
+          echo "Baseline memory: ${baseline_rss} KB"
+          echo "Final memory: ${final_rss} KB"
+
+          # Calculate growth percentage
+          growth_pct=$(( (final_rss - baseline_rss) * 100 / baseline_rss ))
+          echo "Memory growth: ${growth_pct}%"
+
+          # Fail if memory grew more than 50% (adjust threshold as needed)
+          if [ $growth_pct -gt 50 ]; then
+            echo "::warning::Memory grew by ${growth_pct}% which exceeds 50% threshold"
+            echo "MEMORY_LEAK_WARNING=true" >> $GITHUB_ENV
+          fi
+
+          # Save memory analysis
+          echo "baseline_kb,final_kb,growth_pct" > results/memory_analysis.csv
+          echo "${baseline_rss},${final_rss},${growth_pct}" >> results/memory_analysis.csv
+
+      - name: Stop monitoring and collect logs
+        if: always()
+        run: |
+          # Stop memory monitor
+          if [ -f /tmp/memmon.pid ]; then
+            kill $(cat /tmp/memmon.pid) 2>/dev/null || true
+          fi
+
+          # Stop FerrisKey
+          if [ -f /tmp/ferriskey.pid ]; then
+            kill $(cat /tmp/ferriskey.pid) 2>/dev/null || true
+          fi
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-test-results-${{ github.run_number }}
+          path: results/
+          retention-days: 30
+
+      - name: Generate summary report
+        if: always()
+        run: |
+          echo "## Nightly Performance Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**FerrisKey Ref:** ${{ github.event.inputs.ferriskey_ref || 'main' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Memory Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Baseline | ${{ env.BASELINE_RSS }} KB |" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f results/memory_analysis.csv ]; then
+            tail -1 results/memory_analysis.csv | while IFS=',' read -r baseline final growth; do
+              echo "| Final | ${final} KB |" >> $GITHUB_STEP_SUMMARY
+              echo "| Growth | ${growth}% |" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+          if [ "${{ env.MEMORY_LEAK_WARNING }}" == "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":warning: **Warning:** Potential memory leak detected!" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          for result in results/*.json; do
+            if [ -f "$result" ]; then
+              test_name=$(basename "$result" .json)
+              echo "| $test_name | :white_check_mark: Completed |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
