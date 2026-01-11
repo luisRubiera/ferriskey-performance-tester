@@ -54,16 +54,18 @@ def print_error(msg: str) -> None:
 
 
 def get_admin_token() -> str:
-    """Get admin access token from FerrisKey using client credentials."""
+    """Get admin access token from FerrisKey using password grant."""
     print_warning("Getting admin access token...")
 
     url = f"{CONFIG['base_url']}/realms/{CONFIG['admin_realm']}/protocol/openid-connect/token"
 
-    # Use client_credentials grant
+    # Use password grant with admin user
     data = {
-        "grant_type": "client_credentials",
+        "grant_type": "password",
         "client_id": CONFIG["client_id"],
         "client_secret": CONFIG["client_secret"],
+        "username": CONFIG["admin_username"],
+        "password": CONFIG["admin_password"],
     }
 
     try:

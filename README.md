@@ -87,36 +87,17 @@ docker pull grafana/k6
 
 ## Quick Start
 
-### 1. Clone and Setup
+### 1. Clone the Performance Tester
 
 ```bash
-git clone https://github.com/ferriskey/ferriskey-perf-tester.git
-cd ferriskey-perf-tester
+git clone https://github.com/luisRubiera/ferriskey-performance-tester.git
+cd ferriskey-performance-tester
 
 # Copy environment configuration
 cp .env.example .env
 ```
 
-### 2. Configure Environment
-
-Edit `.env` with your FerrisKey settings:
-
-```bash
-# .env
-BASE_URL=http://localhost:3333
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin
-ADMIN_REALM=master
-PERF_REALM=perf
-CLIENT_ID=perf-client
-CLIENT_SECRET=perf-client-secret
-USER_COUNT=50
-USER_PASSWORD=perf-password
-```
-
-Default values work for local FerrisKey development setup.
-
-### 3. Start FerrisKey
+### 2. Start FerrisKey
 
 ```bash
 # Clone FerrisKey if you haven't
@@ -130,41 +111,93 @@ docker compose --profile local up -d
 cd api && cargo run
 ```
 
-### 4. Seed Test Data
+### 3. Configure FerrisKey for Performance Testing
+
+Before running the seed script, you need to set up FerrisKey with the proper realm, client, and permissions.
+
+#### Step 3.1: Create a Realm
+
+1. Log in to FerrisKey admin console
+2. Create a new realm (e.g., `perf-realm`)
+
+#### Step 3.2: Create a Client
+
+1. In your realm, go to **Clients** and create a new client:
+   - **Client ID**: `perf-client`
+   - **Client Type**: `confidential`
+   - **Service Account Enabled**: `true`
+   - **Direct Access Grants Enabled**: `true`
+   - **Protocol**: `openid-connect`
+2. Save and note the **Client Secret** generated
+
+#### Step 3.3: Create a Role with ManageUsers Permission
+
+1. Go to **Roles** in your realm
+2. Create a new role (e.g., `perf-admin`)
+3. Assign the **ManageUsers** permission to this role
+
+#### Step 3.4: Assign the Role to the Service Account User
+
+When you create a client with `service_account_enabled: true`, FerrisKey automatically creates a service account user (usually named `service-account-<client-id>`).
+
+1. Go to **Users** and find `service-account-perf-client`
+2. Go to the user's **Role Mappings**
+3. Assign the `perf-admin` role (or the role with ManageUsers permission) to this user
+4. Set a password for this service account user
+
+### 4. Configure Environment
+
+Edit `.env` with your FerrisKey settings
+
+### 5. Seed Test Data
 
 ```bash
 # Using uv (recommended)
 uv run python scripts/seed_test_data.py
-
-# Or with standard Python (after uv sync)
-uv sync
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-python scripts/seed_test_data.py
 ```
 
 This creates:
-- A `perf` realm
-- Test clients (`perf-client`)
-- 50 test users (`perf-user-001` through `perf-user-050`)
+- Test users (`perf-user-001` through `perf-user-100`)
+- Sets passwords for all test users
 
-### 5. Run Performance Tests
+### 6. Run Performance Tests
+
+k6 doesn't automatically read `.env` files, so you need to source the environment first:
 
 ```bash
-# Quick smoke test
-k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/token_client_credentials.js
+# Source .env and run k6
+set -a && source .env && set +a && k6 run k6/scenarios/token_client_credentials.js
+```
 
-# Full load test with custom parameters
-k6 run \
-  --env BASE_URL=http://localhost:3333 \
-  --env REALM=perf \
-  --env CLIENT_ID=perf-client \
-  --env CLIENT_SECRET=perf-client-secret \
+Run different scenarios:
+
+```bash
+# Token client credentials test
+set -a && source .env && set +a && k6 run k6/scenarios/token_client_credentials.js
+
+# Token password grant test
+set -a && source .env && set +a && k6 run k6/scenarios/token_password.js
+
+# JWKS endpoint test
+set -a && source .env && set +a && k6 run k6/scenarios/jwks.js
+
+# Userinfo endpoint test
+set -a && source .env && set +a && k6 run k6/scenarios/userinfo.js
+
+# Mixed workload test
+set -a && source .env && set +a && k6 run k6/scenarios/mixed_workload.js
+```
+
+With custom VUs and duration:
+
+```bash
+set -a && source .env && set +a && k6 run \
   --env VUS=100 \
   --env DURATION=5m \
   k6/scenarios/mixed_workload.js
 ```
 
-### 6. Cleanup (Optional)
+### 7. Cleanup (Optional)
 
 ```bash
 uv run python scripts/cleanup_test_data.py
@@ -182,17 +215,19 @@ All configuration is managed via `.env` file or environment variables.
 # FerrisKey connection
 BASE_URL=http://localhost:3333
 
-# Admin credentials (for seeding/cleanup)
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin
-ADMIN_REALM=master
+# Admin realm (where your admin user and client exist)
+ADMIN_REALM=perf-realm
 
-# Performance test realm
-PERF_REALM=perf
+# Admin user credentials (user with ManageUsers permission)
+ADMIN_USERNAME=service-account-perf-client
+ADMIN_PASSWORD=your-password
 
-# Test client configuration
+# Client credentials (client must have direct_access_grants_enabled)
 CLIENT_ID=perf-client
-CLIENT_SECRET=perf-client-secret
+CLIENT_SECRET=your-client-secret
+
+# Performance test realm (can be same as admin realm)
+PERF_REALM=perf-realm
 
 # Test user configuration
 USER_COUNT=50
@@ -206,12 +241,12 @@ TEST_PASSWORD=perf-password
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BASE_URL` | `http://localhost:3333` | FerrisKey base URL |
-| `ADMIN_USERNAME` | `admin` | Admin username for seeding |
-| `ADMIN_PASSWORD` | `admin` | Admin password for seeding |
-| `ADMIN_REALM` | `master` | Admin realm for authentication |
-| `PERF_REALM` | `perf` | Performance test realm name |
+| `ADMIN_USERNAME` | - | Admin username (service account with ManageUsers) |
+| `ADMIN_PASSWORD` | - | Admin user password |
+| `ADMIN_REALM` | `perf-realm` | Realm where admin user exists |
+| `PERF_REALM` | `perf-realm` | Performance test realm name |
 | `CLIENT_ID` | `perf-client` | Test client ID |
-| `CLIENT_SECRET` | `perf-client-secret` | Test client secret |
+| `CLIENT_SECRET` | - | Test client secret |
 | `USER_COUNT` | `50` | Number of test users to create |
 | `USER_PASSWORD` | `perf-password` | Password for all test users |
 | `TEST_USERNAME` | `perf-user-001` | Default test user for password grant |
@@ -224,7 +259,7 @@ TEST_PASSWORD=perf-password
 Tests machine-to-machine authentication using the OAuth2 client credentials grant.
 
 ```bash
-k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/token_client_credentials.js
+set -a && source .env && set +a && k6 run k6/scenarios/token_client_credentials.js
 ```
 
 **Default thresholds:**
@@ -236,7 +271,7 @@ k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/token_client_credential
 Tests user authentication using the OAuth2 password grant with a pool of test users.
 
 ```bash
-k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/token_password.js
+set -a && source .env && set +a && k6 run k6/scenarios/token_password.js
 ```
 
 **Default thresholds:**
@@ -248,7 +283,7 @@ k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/token_password.js
 Tests the JSON Web Key Set endpoint used for JWT validation.
 
 ```bash
-k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/jwks.js
+set -a && source .env && set +a && k6 run k6/scenarios/jwks.js
 ```
 
 **Default thresholds:**
@@ -260,7 +295,7 @@ k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/jwks.js
 Tests the OpenID Connect userinfo endpoint with Bearer token authentication.
 
 ```bash
-k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/userinfo.js
+set -a && source .env && set +a && k6 run k6/scenarios/userinfo.js
 ```
 
 **Default thresholds:**
@@ -276,7 +311,7 @@ Simulates realistic IAM traffic with weighted distribution:
 - 10% JWKS requests
 
 ```bash
-k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/mixed_workload.js
+set -a && source .env && set +a && k6 run k6/scenarios/mixed_workload.js
 ```
 
 ## k6 Test Configuration
@@ -286,9 +321,9 @@ k6 run --env BASE_URL=http://localhost:3333 k6/scenarios/mixed_workload.js
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BASE_URL` | `http://localhost:3333` | FerrisKey base URL |
-| `REALM` | `perf` | Realm for tests |
+| `REALM` | `perf-realm` | Realm for tests |
 | `CLIENT_ID` | `perf-client` | OAuth2 client ID |
-| `CLIENT_SECRET` | `perf-client-secret` | OAuth2 client secret |
+| `CLIENT_SECRET` | - | OAuth2 client secret |
 | `TEST_USERNAME` | `perf-user-001` | Test user for password grant |
 | `TEST_PASSWORD` | `perf-password` | Test user password |
 | `VUS` | `50` | Number of virtual users |
@@ -356,11 +391,11 @@ python scripts/cleanup_test_data.py
 
 Creates the performance test environment:
 
-1. Authenticates as admin
-2. Creates the `perf` realm
-3. Creates test clients from `data/clients.json`
-4. Creates test users (configurable count)
-5. Sets passwords for all users
+1. Authenticates using password grant (admin user + client credentials)
+2. Creates test users (configurable count)
+3. Sets passwords for all users
+
+**Prerequisites:** The realm, client, and admin user must already exist in FerrisKey (see Step 3 in Quick Start).
 
 #### cleanup_test_data.py
 
@@ -392,12 +427,20 @@ The `perf-nightly.yml` workflow runs at 2 AM UTC:
   run: uv run python scripts/seed_test_data.py
   env:
     BASE_URL: ${{ env.FERRISKEY_URL }}
+    ADMIN_REALM: perf-realm
+    ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+    ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+    CLIENT_ID: perf-client
+    CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
     USER_COUNT: 100
 
 - name: Run performance tests
   run: |
     k6 run \
       --env BASE_URL=${{ env.FERRISKEY_URL }} \
+      --env REALM=perf-realm \
+      --env CLIENT_ID=perf-client \
+      --env CLIENT_SECRET=${{ secrets.CLIENT_SECRET }} \
       --env VUS=50 \
       --env DURATION=5m \
       --out json=results.json \
@@ -477,11 +520,26 @@ export default function () {
 
 ### "Failed to get admin token"
 
-Ensure FerrisKey is running and the admin credentials are correct:
+1. Ensure FerrisKey is running
+2. Verify your admin credentials in `.env`
+3. Check that the client has `direct_access_grants_enabled: true`
+4. Test manually:
+
 ```bash
-curl -X POST http://localhost:3333/realms/master/protocol/openid-connect/token \
-  -d "grant_type=password&client_id=admin-cli&username=admin&password=admin"
+curl -X POST http://localhost:3333/realms/perf-realm/protocol/openid-connect/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "client_id=perf-client" \
+  -d "client_secret=YOUR_SECRET" \
+  -d "username=YOUR_ADMIN_USER" \
+  -d "password=YOUR_ADMIN_PASSWORD"
 ```
+
+### "insufficient permissions" (403)
+
+The admin user doesn't have the required permissions. Ensure:
+1. You created a role with **ManageUsers** permission
+2. The role is assigned to the service account user (`service-account-perf-client`)
 
 ### "Realm may already exist"
 
@@ -493,6 +551,14 @@ This is normal on repeated seeding. The script handles existing resources gracef
 2. Verify test data was seeded correctly
 3. Ensure database connections aren't exhausted
 4. Check if rate limiting is enabled
+
+### k6 "Cannot reach token endpoint"
+
+Make sure you source the `.env` file before running k6:
+
+```bash
+set -a && source .env && set +a && k6 run k6/scenarios/token_client_credentials.js
+```
 
 ### uv Issues
 
