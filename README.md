@@ -27,8 +27,10 @@ ferriskey-perf-tester/
 │       ├── auth.js                   # Authentication helpers
 │       └── data.js                   # Test data helpers
 ├── scripts/
-│   ├── seed_test_data.py            # Seed test data (Python)
-│   └── cleanup_test_data.py         # Clean up test data (Python)
+│   ├── seed_test_data.py            # Seed test data for FerrisKey
+│   ├── seed_test_data_keycloak.py   # Seed test data for Keycloak
+│   ├── cleanup_test_data.py         # Clean up test data (FerrisKey)
+│   └── cleanup_test_data_keycloak.py # Clean up test data (Keycloak)
 ├── data/
 │   ├── realm.json                   # Realm fixture
 │   ├── clients.json                 # Client fixtures
@@ -515,6 +517,72 @@ export default function () {
 - [ ] Custom Prometheus metrics from FerrisKey
 - [ ] Grafana dashboard for results visualization
 - [ ] Baseline comparison in CI
+
+## Using with Keycloak
+
+This performance tester also works with Keycloak. The k6 scenarios are compatible with both FerrisKey and Keycloak since they both implement the same OpenID Connect endpoints.
+
+### Keycloak-Specific Scripts
+
+For Keycloak, use the dedicated seeding and cleanup scripts:
+
+```bash
+# Seed test data in Keycloak
+uv run python scripts/seed_test_data_keycloak.py
+
+# Cleanup test data from Keycloak
+uv run python scripts/cleanup_test_data_keycloak.py
+```
+
+### Keycloak Environment Configuration
+
+Create a `.env` file with Keycloak-specific settings:
+
+```bash
+# Keycloak connection (default port is 8080)
+BASE_URL=http://localhost:8080
+
+# Admin realm (Keycloak uses 'master' for admin operations)
+ADMIN_REALM=master
+
+# Admin credentials (Keycloak admin user)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin
+
+# Performance test realm (will be created by seed script)
+PERF_REALM=perf
+
+# Client configuration (will be created by seed script)
+CLIENT_ID=perf-client
+CLIENT_SECRET=perf-client-secret
+
+# Test user configuration
+USER_COUNT=50
+USER_PASSWORD=perf-password
+TEST_USERNAME=perf-user-001
+TEST_PASSWORD=perf-password
+```
+
+### Key Differences from FerrisKey
+
+| Aspect | FerrisKey | Keycloak |
+|--------|-----------|----------|
+| Default Port | 3333 | 8080 |
+| Admin Realm | Your realm | `master` |
+| Admin Auth | Password grant with your client | `admin-cli` client |
+| Admin API Path | `/realms/` | `/admin/realms/` |
+| Seed Script | `seed_test_data.py` | `seed_test_data_keycloak.py` |
+
+### Running k6 Tests Against Keycloak
+
+The k6 scenarios work identically for both systems:
+
+```bash
+# Source .env and run tests against Keycloak
+set -a && source .env && set +a && k6 run k6/scenarios/token_client_credentials.js
+```
+
+Make sure your `.env` has the correct `BASE_URL` and `PERF_REALM` for Keycloak.
 
 ## Troubleshooting
 
